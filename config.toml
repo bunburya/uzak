@@ -1,0 +1,26 @@
+# URL of wiki page that lists all available ZIM archives (in the expected format).
+content_url = "https://wiki.kiwix.org/wiki/Content_in_all_languages"
+
+# Base directory where ZIM archives, library file and database file will be stored.
+base_dir = "/path/to/base/dir"
+
+# Whether to delete older versions of the same archive when a new version is found.
+delete_old = true
+
+# Path to the `kiwix-manage` tool, used to manage the library file.
+kiwix_manage_exec = "/usr/bin/kiwix-manage"
+
+[[archive]]
+project = "archlinux"
+language = "en"
+flavor = "all maxi"
+
+[[archive]]
+project = "history.stackexchange.com"
+language = "en"
+flavor = "all"
+
+[[archive]]
+project = "law.stackexchange.com"
+language = "en"
+flavor = "all"
