@@ -1,5 +1,6 @@
 import hashlib
 import logging
+import math
 import os.path
 import sqlite3
 import subprocess
@@ -8,6 +9,7 @@ from argparse import ArgumentParser
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Optional, Collection
+from enum import IntEnum
 
 import bs4
 import platformdirs
@@ -19,6 +21,7 @@ from tqdm import tqdm
 sqlite3.register_adapter(date, lambda d: d.strftime("%Y-%m-%d"))
 sqlite3.register_converter("DATE", lambda b: datetime.strptime(b.decode(), "%Y-%m-%d").date())
 
+# Configure logging
 logger = logging.getLogger(__name__)
 logger.propagate = False
 # Logger to handle "normal" output, ie, information provided to the user in the usual way.
@@ -34,7 +37,6 @@ bad_output.setLevel(logging.WARN)
 
 logger.addHandler(normal_output)
 logger.addHandler(bad_output)
-
 logging.basicConfig(level=logging.INFO)
 
 
@@ -44,6 +46,33 @@ class DownloadError(Exception):
 
 class ParserError(Exception):
     pass
+
+
+class FileSizeSuffix(IntEnum):
+    B = 1
+    KB = 1024
+    MB = 1_048_576
+    GB = 1_073_741_824
+    TB = 1_099_511_627_776
+
+
+def str_to_bytes(s: str) -> int:
+    """Convert a human-readable description of a file size like "2.34 GB" to bytes."""
+    n, suf = s.split()
+    n = float(n)
+    mul = int(FileSizeSuffix[suf])
+    return int(n * mul)
+
+
+def bytes_to_str(b: int) -> str:
+    """Convert a number of bytes to a human-readable description like "2.34 GB"."""
+    if b < 0:
+        raise ValueError(f"Negative value for number of bytes: {b}.")
+    for suf in reversed(FileSizeSuffix):
+        if b >= suf:
+            div = round(b / suf, 2)
+            return f"{div} {suf.name}"
+    return f"{b} B"
 
 
 def parse_date(s: str) -> date:
@@ -100,6 +129,7 @@ class DownloadDetails:
     """Dataclass containing the details necessary to download the current version of an archive."""
     archive_reference: ArchiveReference
     zim_link: str
+    size_bytes: int
     sha256_link: str
     torrent_link: str
     magnet_link: str
@@ -270,6 +300,7 @@ class Parser:
         if (reference in self.archive_refs) and (not dbm.archive_exists(reference, date_created)):
             return DownloadDetails(
                 archive_reference=reference,
+                size_bytes=str_to_bytes(size_td.text.strip()),
                 zim_link=zim_link,
                 sha256_link=sha_link,
                 torrent_link=bt_link,
@@ -279,11 +310,9 @@ class Parser:
         else:
             return None
 
-    def parse_page(self, dbm: DbManager) -> list[DownloadDetails]:
-        """Parse the table containing ZIM archive details and return a list of download details for new, relevant
+    def get_archive_rows(self) -> list[bs4.element.Tag]:
+        """Parse the web page and return a list of `bs4` objects representing <tr> tags containing the details of the
         archives.
-
-        :param dbm: :class:`DbManager` object, used to query whether a given archive has already been downloaded.
         """
         r = requests.get(self.url)
         r.raise_for_status()
@@ -291,16 +320,42 @@ class Parser:
         table = page.find("table", id="zimtable")
         if table is None:
             raise ParserError("Could not find table with id `zimtable`.")
+        return table.find_all("tr")[1:]
+
+    def find_updated_archives(self, dbm: DbManager) -> list[DownloadDetails]:
+        """Parse the web page and return a list of download details for new, relevant archives.
+
+        :param dbm: :class:`DbManager` object, used to query whether a given archive has already been downloaded.
+        """
+        rows = self.get_archive_rows()
         details = []
-        for tr in table.find_all("tr")[1:]:
+        for tr in rows:
             if (d := self.parse_archive_row(tr, dbm)) is not None:
                 details.append(d)
         return details
 
+    def find_archive_refs(self, lang: Optional[str]) -> list[ArchiveReference]:
+        """Parse the web page and return a list of :class:`ArchiveReference` objects representing the available
+        archives.
+
+        :param lang: If provided, only archives in the given language are provided.
+        """
+        refs = []
+        for tr in self.get_archive_rows():
+            proj_td, lang_td, _, _, flav_td, _ = tr.find_all("td")
+            arc_lang = lang_td.text.strip()
+            if (lang is None) or (arc_lang == lang):
+                refs.append(ArchiveReference(
+                    proj_td.text.strip().split()[0],
+                    arc_lang,
+                    flav_td.text.strip()
+                ))
+        return refs
+
 
 class DownloadManager:
 
-    def __init__(self, archive_dir: str, library_file: str):
+    def __init__(self, archive_dir: str):
         self.archive_dir = archive_dir
 
     def download(
@@ -368,15 +423,34 @@ class ArchiveManager:
 
     def __init__(self, config: Config):
         self.config = config
-        self.db_manager = DbManager(config.db_path)
-        self.parser = Parser(config.content_url, config.archives)
-        self.dl_manager = DownloadManager(config.archive_dir, config.library_path)
+        # Lazy initiate these as they may not be needed depending on the subcommands run
+        self._db_manager: Optional[DbManager] = None
+        self._dl_manager: Optional[DownloadManager] = None
+        self._parser: Optional[Parser] = None
         if os.path.isfile(config.base_dir):
             raise FileExistsError(f"Already a non-directory file at {config.base_dir}.")
         if os.path.isfile(config.archive_dir):
             raise FileExistsError(f"Already a non-directory file at {config.archive_dir}.")
         if not os.path.exists(config.archive_dir):
             os.makedirs(config.archive_dir)
+
+    @property
+    def dl_manager(self) -> DownloadManager:
+        if self._dl_manager is None:
+            self._dl_manager = DownloadManager(self.config.archive_dir)
+        return self._dl_manager
+
+    @property
+    def parser(self) -> Parser:
+        if self._parser is None:
+            self._parser = Parser(self.config.content_url, self.config.archives)
+        return self._parser
+
+    @property
+    def db_manager(self) -> DbManager:
+        if self._db_manager is None:
+            self._db_manager = DbManager(self.config.db_path)
+        return self._db_manager
 
     def add_to_library(self, archive: ArchiveDetails):
         archive_path = os.path.join(self.config.archive_dir, archive.file_name)
@@ -404,8 +478,17 @@ class ArchiveManager:
         if zim_id is not None:
             subprocess.run([self.config.kiwix_manage_exec, self.config.library_path, "remove", zim_id])
 
-    def update(self):
-        for to_dl in self.parser.parse_page(self.db_manager):
+    def update(self, prompt: bool = False):
+        all_new = self.parser.find_updated_archives(self.db_manager)
+        if prompt:
+            n_downloads = len(all_new)
+            total_size_bytes = sum(d.size_bytes for d in all_new)
+            total_size = bytes_to_str(total_size_bytes)
+            proceed = input(f"Will download {n_downloads} archive(s) totalling approx {total_size}. Proceed? [y/N] ")
+            if proceed.lower() != "y":
+                logger.info("Aborting.")
+                return
+        for to_dl in all_new:
             new = self.dl_manager.download(to_dl)
             self.db_manager.insert_archive(new)
             self.add_to_library(new)
@@ -417,11 +500,36 @@ class ArchiveManager:
                     self.db_manager.delete_archive(old)
                     self.remove_from_library(old)
 
+    def get_archive_configs(self, lang: Optional[str] = None) -> str:
+        """Scrape details of all archives from the website and return a string with their details in a format that can
+        be appended to a config file.
+
+        :param lang: If provided, only archives in this language will be listed.
+        """
+        lines = []
+        for a in self.parser.find_archive_refs(lang):
+            lines.append("[[archive]]")
+            lines.append(f'project = "{a.project}"')
+            lines.append(f'language = "{a.language}"')
+            lines.append(f'flavor = "{a.flavor}"')
+            lines.append("")
+        return "\n".join(lines)
+
 
 def main():
     arg_parser = ArgumentParser(description="Fetch new ZIM archives from download.kiwix.org.")
     arg_parser.add_argument("-c", "--config", metavar="PATH", help="Path to config file to use.")
     arg_parser.add_argument("-d", "--debug", action="store_true", help="Debug mode (verbose logging).")
+    subparsers = arg_parser.add_subparsers(required=True)
+    update_parser = subparsers.add_parser("update", help="Update archives.")
+    update_parser.add_argument("-p", "--prompt", action="store_true",
+                               help="Prompt for confirmation (once) before downloading.")
+    update_parser.set_defaults(func=lambda mgr, ns: mgr.update(ns.prompt))
+    find_archives_parser = subparsers.add_parser("find-archives",
+                                                 help="Get a list of all available archives, in an appropiate format "
+                                                      "for inclusion in a config file.")
+    find_archives_parser.add_argument("--lang", help="Language to filter by.")
+    find_archives_parser.set_defaults(func=lambda mgr, ns: print(mgr.get_archive_configs(ns.lang)))
 
     args = arg_parser.parse_args()
 
@@ -434,8 +542,7 @@ def main():
         raise FileNotFoundError(f"Could not find configuration file at {conf_file}")
     config = Config.from_toml_file(conf_file)
     manager = ArchiveManager(config)
-    manager.update()
-    manager.db_manager.conn.close()
+    args.func(manager, args)
 
 
 if __name__ == "__main__":
