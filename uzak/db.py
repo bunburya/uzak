@@ -1,4 +1,3 @@
-# Register sqlite3 converters and adapters
 import sqlite3
 from datetime import date, datetime
 
