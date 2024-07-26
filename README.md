@@ -93,7 +93,7 @@ Call `uzak -h` to find more information about available options.
 
 ## Dependencies
 
-`uzak` is a Python script, targeting Python 3.12 or above. Python dependencies are listed in the Pipfile. You also need
+`uzak` is a Python script, targeting Python 3.11 or above. Python dependencies are listed in the Pipfile. You also need
 to have `kiwix-manage` installed, as it invokes this tool to update your Kiwix library file.
 
 More broadly, of course, it depends on the Kiwix web page linked above remaining available, and in substantially the
