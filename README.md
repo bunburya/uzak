@@ -89,6 +89,24 @@ Example:
 uzak find-archives --lang en
 ```
 
+The `add` subcommand allows you to add an archive from a location on disk. In addition to providing the path to the
+existing file, you must specify the project, language and flavour as arguments, and optionally the date the archive was
+created in YYYY-MM format. If the date is omitted, then `uzak` will attempt to figure it out by looking for a date in
+the YYYY-MM format at the end of the given file path, just before the `.zim` extension. Calling `add` will move the file
+into the archives directory, add the archive to the database and also (if not present already) append an `[[archive]]`
+section to the config file. Passing the `--copy` comment will copy the file into the archives directory rather than
+moving it so that the original file is preserved. This is necessary if the source file is not on the same device as the
+archives directory.
+
+Example:
+
+```shell
+# Move file, specify date
+uzak add /path/to/wiktionary_en_simple_all_maxi_2024-06.zim wiktionary en "simple all maxi" 2024-06
+# Copy file, parse date
+uzak add /path/to/wiktionary_en_simple_all_maxi_2024-06.zim wiktionary en "simple all maxi" --copy
+```
+
 Call `uzak -h` to find more information about available options.
 
 ## Dependencies
