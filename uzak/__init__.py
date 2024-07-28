@@ -1,17 +1,19 @@
 import logging
 import os.path
+import shutil
 import subprocess
 from argparse import ArgumentParser
+from datetime import date
 from typing import Optional
 
 import platformdirs
 
 from uzak.config import Config
-from uzak.datamodel import ArchiveDetails
+from uzak.datamodel import ArchiveDetails, ArchiveReference
 from uzak.db import DbManager
-from uzak.download import DownloadManager
+from uzak.download import DownloadManager, get_file_hash
 from uzak.log import get_logger
-from uzak.parser import Parser, FileSizeSuffix
+from uzak.parser import Parser, FileSizeSuffix, parse_date
 
 logger = get_logger(__name__)
 
@@ -88,6 +90,9 @@ class ArchiveManager:
 
     def update(self, prompt: bool = False):
         all_new = self.parser.find_updated_archives(self.db_manager)
+        if not all_new:
+            logger.info("Nothing to download.")
+            return
         if prompt:
             n_downloads = len(all_new)
             total_size_bytes = sum(d.size_bytes for d in all_new)
@@ -114,14 +119,46 @@ class ArchiveManager:
 
         :param lang: If provided, only archives in this language will be listed.
         """
-        lines = []
-        for a in self.parser.find_archive_refs(lang):
-            lines.append("[[archive]]")
-            lines.append(f'project = "{a.project}"')
-            lines.append(f'language = "{a.language}"')
-            lines.append(f'flavor = "{a.flavor}"')
-            lines.append("")
-        return "\n".join(lines)
+        sections = [a.to_config() for a in self.parser.find_archive_refs(lang)]
+        return "\n\n".join(sections)
+
+    def add_file(
+            self,
+            filepath: str,
+            ref: ArchiveReference,
+            date_created: Optional[date] = None,
+            copy: bool = True
+    ) -> ArchiveDetails:
+        if date_created is None:
+            # Try parse from filepath
+            date_str = filepath.removesuffix(".zim").split("_")[-1]
+            date_created = parse_date(date_str)
+        if self.db_manager.archive_exists(ref, date_created):
+            raise ValueError(f"Archive already exists in database: f{ref}")
+        archive_filename = ref.to_file_name(date_created)
+        archive_filepath = os.path.join(self.config.archive_dir, archive_filename)
+        if os.path.exists(archive_filepath):
+            raise FileExistsError(f"File already exists: {archive_filepath}")
+        sha = get_file_hash(filepath)
+        archive = ArchiveDetails(
+            ref,
+            date_created,
+            archive_filename,
+            sha
+        )
+        if copy:
+            shutil.copyfile(filepath, archive_filepath)
+        else:
+            os.rename(filepath, archive_filepath)
+        self.db_manager.insert_archive(archive)
+        if ref not in self.config.archives:
+            with open(self.config.config_file_path, "a") as f:
+                f.write("\n")
+                f.write(ref.to_config())
+                f.write("\n")
+            self.config.archives.append(ref)
+        logger.info(f"Added {filepath} to archive as {archive_filename}.")
+        return archive
 
 
 def main():
@@ -134,10 +171,24 @@ def main():
                                help="Prompt for confirmation (once) before downloading.")
     update_parser.set_defaults(func=lambda mgr, ns: mgr.update(ns.prompt))
     find_archives_parser = subparsers.add_parser("find-archives",
-                                                 help="Get a list of all available archives, in an appropiate format "
+                                                 help="Get a list of all available archives, in an appropriate format "
                                                       "for inclusion in a config file.")
     find_archives_parser.add_argument("--lang", help="Language to filter by.")
     find_archives_parser.set_defaults(func=lambda mgr, ns: print(mgr.get_archive_configs(ns.lang)))
+    add_parser = subparsers.add_parser("add", help="Add a file to the library.")
+    add_parser.add_argument("file", help="Path to file to add.")
+    add_parser.add_argument("project", help="Project name of archive.")
+    add_parser.add_argument("language", help="Language of archive.")
+    add_parser.add_argument("flavor", help="Flavour of archive.")
+    add_parser.add_argument("date", help="Date archive was created, in YYYY-MM format.", nargs="?")
+    add_parser.add_argument("--copy", action="store_true",
+                            help="Copy file to archives directory, rather than moving it.")
+    add_parser.set_defaults(func=lambda mgr, ns: mgr.add_file(
+        ns.file,
+        ArchiveReference(ns.project, ns.language, ns.flavor),
+        parse_date(ns.date) if ns.date is not None else None,
+        ns.copy
+    ))
 
     args = arg_parser.parse_args()
 

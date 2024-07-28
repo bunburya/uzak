@@ -7,6 +7,7 @@ from uzak.datamodel import ArchiveReference
 
 @dataclass
 class Config:
+    config_file_path: str
     content_url: str
     base_dir: str
     delete_old: bool
@@ -22,10 +23,11 @@ class Config:
         self.db_path = os.path.join(self.base_dir, "archives.db")
 
     @classmethod
-    def from_toml_file(cls, toml_file: str) -> "Config":
-        with open(toml_file, "rb") as f:
+    def from_toml_file(cls, toml_file_path: str) -> "Config":
+        with open(toml_file_path, "rb") as f:
             c = tomllib.load(f)
         return Config(
+            config_file_path=toml_file_path,
             content_url=c["content_url"],
             base_dir=c["base_dir"],
             delete_old=c["delete_old"],

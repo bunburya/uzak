@@ -15,6 +15,15 @@ class DownloadError(Exception):
     pass
 
 
+def get_file_hash(file_path: str) -> str:
+    """Calculate the sha256 hash of the specified file."""
+    file_hash = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        while data := f.read(1024 * 1024 * 10):
+            file_hash.update(data)
+    return file_hash.hexdigest()
+
+
 class DownloadManager:
 
     def __init__(self, archive_dir: str):
@@ -63,11 +72,7 @@ class DownloadManager:
 
         if sha is not None:
             logger.info("Verifying file integrity.")
-            file_hash = hashlib.sha256()
-            with open(part_path, "rb") as f:
-                while data := f.read(1024 * 1024 * 10):
-                    file_hash.update(data)
-            if not file_hash.hexdigest() == sha:
+            if not get_file_hash(part_path) == sha:
                 os.remove(part_path)
                 raise DownloadError(f"sha256 hash of downloaded content not equal to hash downloaded from server. "
                                     "Aborting.")

@@ -1,6 +1,7 @@
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import date
+from typing import Optional
 
 
 @dataclass(eq=True, frozen=True)
@@ -11,6 +12,22 @@ class ArchiveReference:
     project: str
     language: str
     flavor: str
+
+    def to_file_name(self, date_created: Optional[date] = None) -> str:
+        flav = self.flavor.replace(" ", "_")
+        base = "_".join((self.project, self.language, flav))
+        if date_created is not None:
+            base += "_" + date_created.strftime("%Y-%m")
+        return base + ".zim"
+
+    def to_config(self) -> str:
+        lines = [
+            "[[archive]]",
+            f'project = "{self.project}"',
+            f'language = "{self.language}"',
+            f'flavor = "{self.flavor}"'
+        ]
+        return "\n".join(lines)
 
 
 @dataclass
@@ -30,7 +47,7 @@ class DownloadDetails:
         # https://download.kiwix.org/zim/README.
         r = self.archive_reference
         d = self.date_created
-        self.file_name = f"{r.project}_{r.language}_{r.flavor.replace(' ', '_')}_{d.strftime('%Y-%m')}.zim"
+        self.file_name = r.to_file_name(d)
 
 
 @dataclass
