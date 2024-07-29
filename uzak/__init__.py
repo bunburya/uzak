@@ -11,12 +11,9 @@ import platformdirs
 from uzak.config import Config
 from uzak.datamodel import ArchiveDetails, ArchiveReference
 from uzak.db import DbManager
-from uzak.download import DownloadManager, get_file_hash
+from uzak.download import DownloadManager, get_file_hash, DownloadManager
 from uzak.log import get_logger
 from uzak.parser import Parser, FileSizeSuffix, parse_date
-
-logger = get_logger(__name__)
-
 
 def bytes_to_str(b: int) -> str:
     """Convert a number of bytes to a human-readable description like "2.34 GB"."""
@@ -31,8 +28,9 @@ def bytes_to_str(b: int) -> str:
 
 class ArchiveManager:
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, logger: logging.Logger):
         self.config = config
+        self.logger = logger
         # Lazy initiate these as they may not be needed depending on the subcommands run
         self._db_manager: Optional[DbManager] = None
         self._dl_manager: Optional[DownloadManager] = None
@@ -47,7 +45,7 @@ class ArchiveManager:
     @property
     def dl_manager(self) -> DownloadManager:
         if self._dl_manager is None:
-            self._dl_manager = DownloadManager(self.config.archive_dir)
+            self._dl_manager = DownloadManager(self.config.archive_dir, self.logger)
         return self._dl_manager
 
     @property
@@ -91,7 +89,7 @@ class ArchiveManager:
     def update(self, prompt: bool = False):
         all_new = self.parser.find_updated_archives(self.db_manager)
         if not all_new:
-            logger.info("Nothing to download.")
+            self.logger.info("Nothing to download.")
             return
         if prompt:
             n_downloads = len(all_new)
@@ -99,7 +97,7 @@ class ArchiveManager:
             total_size = bytes_to_str(total_size_bytes)
             proceed = input(f"Will download {n_downloads} archive(s) totalling approx {total_size}. Proceed? [y/N] ")
             if proceed.lower() != "y":
-                logger.info("Aborting.")
+                self.logger.info("Aborting.")
                 return
         for to_dl in all_new:
             new = self.dl_manager.download(to_dl)
@@ -108,7 +106,37 @@ class ArchiveManager:
             if self.config.delete_old:
                 for old in self.db_manager.get_older(new.reference, new.date_created):
                     old_path = os.path.join(self.config.archive_dir, old.file_name)
-                    logger.info(f"Deleting file at {old_path}.")
+                    self.logger.info(f"Deleting file at {old_path}.")
+                    os.remove(old_path)
+                    self.db_manager.delete_archive(old)
+                    self.remove_from_library(old)
+
+    def update_async(self, prompt: bool = False, quiet: bool = False):
+        all_new = self.parser.find_updated_archives(self.db_manager)
+        if not all_new:
+            self.logger.info("Nothing to download.")
+            return
+        if prompt:
+            n_downloads = len(all_new)
+            total_size_bytes = sum(d.size_bytes for d in all_new)
+            total_size = bytes_to_str(total_size_bytes)
+            proceed = input(f"Will download {n_downloads} archive(s) totalling approx {total_size}. Proceed? [y/N] ")
+            if proceed.lower() != "y":
+                self.logger.info("Aborting.")
+                return
+        if len(all_new) == 1:
+            # If there is only one archive to download, do it the old non-multithreaded way, as the output from tqdm
+            # isn't great in a multithreaded context
+            downloaded = [self.dl_manager.download(all_new[0], quiet=quiet)]
+        else:
+            downloaded = self.dl_manager.download_all(all_new, verify=True, quiet=quiet)
+        for d in downloaded:
+            self.db_manager.insert_archive(d)
+            self.add_to_library(d)
+            if self.config.delete_old:
+                for old in self.db_manager.get_older(d.reference, d.date_created):
+                    old_path = os.path.join(self.config.archive_dir, old.file_name)
+                    self.logger.info(f"Deleting file at {old_path}.")
                     os.remove(old_path)
                     self.db_manager.delete_archive(old)
                     self.remove_from_library(old)
@@ -157,7 +185,7 @@ class ArchiveManager:
                 f.write(ref.to_config())
                 f.write("\n")
             self.config.archives.append(ref)
-        logger.info(f"Added {filepath} to archive as {archive_filename}.")
+        self.logger.info(f"Added {filepath} to archive as {archive_filename}.")
         return archive
 
 
@@ -165,11 +193,12 @@ def main():
     arg_parser = ArgumentParser(description="Fetch new ZIM archives from download.kiwix.org.")
     arg_parser.add_argument("-c", "--config", metavar="PATH", help="Path to config file to use.")
     arg_parser.add_argument("-d", "--debug", action="store_true", help="Debug mode (verbose logging).")
+    arg_parser.add_argument("-q", "--quiet", action="store_true", help="Disable console output.")
     subparsers = arg_parser.add_subparsers(required=True)
     update_parser = subparsers.add_parser("update", help="Update archives.")
     update_parser.add_argument("-p", "--prompt", action="store_true",
                                help="Prompt for confirmation (once) before downloading.")
-    update_parser.set_defaults(func=lambda mgr, ns: mgr.update(ns.prompt))
+    update_parser.set_defaults(func=lambda mgr, ns: mgr.update_async(ns.prompt, quiet=ns.quiet))
     find_archives_parser = subparsers.add_parser("find-archives",
                                                  help="Get a list of all available archives, in an appropriate format "
                                                       "for inclusion in a config file.")
@@ -192,6 +221,8 @@ def main():
 
     args = arg_parser.parse_args()
 
+    logger = get_logger(__name__, args.quiet)
+
     if args.debug:
         logging.basicConfig(level=logging.DEBUG)
 
@@ -200,7 +231,7 @@ def main():
     if not os.path.isfile(conf_file):
         raise FileNotFoundError(f"Could not find configuration file at {conf_file}")
     config = Config.from_toml_file(conf_file)
-    manager = ArchiveManager(config)
+    manager = ArchiveManager(config, logger)
     args.func(manager, args)
 
 

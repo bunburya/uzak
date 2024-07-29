@@ -1,5 +1,10 @@
 import hashlib
 import os
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
+from logging import Logger
+from threading import RLock
+from typing import Optional
 
 import psutil
 import requests
@@ -7,9 +12,6 @@ from tqdm import tqdm
 
 from uzak.datamodel import DownloadDetails, ArchiveDetails
 from uzak.log import get_logger
-
-logger = get_logger(__name__)
-
 
 class DownloadError(Exception):
     pass
@@ -26,17 +28,20 @@ def get_file_hash(file_path: str) -> str:
 
 class DownloadManager:
 
-    def __init__(self, archive_dir: str):
+    def __init__(self, archive_dir: str, logger: Logger):
         self.archive_dir = archive_dir
+        self.logger = logger
 
     def download(
             self,
             download: DownloadDetails,
             check_length: bool = True,
-            verify: bool = True
+            verify: bool = True,
+            quiet: bool = False,
+            pbar_position: Optional[int] = None
     ) -> ArchiveDetails:
 
-        logger.info(f"Downloading ZIM file from {download.zim_link}.")
+        self.logger.info(f"Downloading ZIM file from {download.zim_link}.")
 
         if check_length:
             head_response = requests.head(download.zim_link, allow_redirects=True)
@@ -64,14 +69,21 @@ class DownloadManager:
         if not content_response.ok:
             raise DownloadError("Could not download content. Aborting.")
 
-        with tqdm(total=size, unit='B', unit_scale=True) as progress_bar:
+        with tqdm(
+                total=size,
+                unit='B',
+                unit_scale=True,
+                desc=download.file_name.removesuffix(".zim"),
+                position=pbar_position,
+                leave=(pbar_position is None),  # Only leave traces if we're not in multithreaded environment
+                disable=quiet
+        ) as progress_bar:
             with open(part_path, 'wb') as f:
                 for chunk in content_response.iter_content(chunk_size=1024 * 1024):
                     progress_bar.update(len(chunk))
                     f.write(chunk)
 
         if sha is not None:
-            logger.info("Verifying file integrity.")
             if not get_file_hash(part_path) == sha:
                 os.remove(part_path)
                 raise DownloadError(f"sha256 hash of downloaded content not equal to hash downloaded from server. "
@@ -85,3 +97,19 @@ class DownloadManager:
             file_name=download.file_name,
             sha256=sha
         )
+
+    def download_all(
+            self,
+            downloads: list[DownloadDetails],
+            check_length: bool = True,
+            verify: bool = True,
+            quiet: bool = False
+    ) -> list[ArchiveDetails]:
+        tqdm.set_lock(RLock())
+        # below is attempt to address https://github.com/tqdm/tqdm/issues/670 but doesn't seem to work...
+        posn_range = range(1, len(downloads) + 1)
+        with ThreadPoolExecutor(initializer=tqdm.set_lock, initargs=(tqdm.get_lock(),)) as p:
+            return list(p.map(
+                lambda d, posn: self.download(d, check_length, verify, quiet, posn),
+                downloads, posn_range
+            ))
