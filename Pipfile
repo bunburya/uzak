@@ -4,12 +4,8 @@ verify_ssl = true
 name = "pypi"
 
 [packages]
-bs4 = "*"
-psutil = "*"
-tqdm = "*"
-platformdirs = "*"
-requests = "*"
 
 [dev-packages]
 
 [requires]
+python_version = "3.12"

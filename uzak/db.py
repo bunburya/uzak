@@ -16,8 +16,7 @@ class DbManager:
             language TEXT NOT NULL,
             flavor TEXT,
             date_created DATE NOT NULL,
-            file_name TEXT NOT NULL,
-            sha256 TEXT NOT NULL
+            file_name TEXT NOT NULL
         )
     """
 
@@ -32,7 +31,7 @@ class DbManager:
 
     INSERT_ARCHIVE = """
         INSERT INTO archives
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?)
     """
 
     SELECT_OLDER = """
@@ -113,6 +112,5 @@ class DbManager:
                 archive.reference.language,
                 archive.reference.flavor,
                 archive.date_created.strftime("%Y-%m-%d"),
-                archive.file_name,
-                archive.sha256
+                archive.file_name
             ))

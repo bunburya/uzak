@@ -1,7 +1,6 @@
 import hashlib
 import os
 from concurrent.futures import ThreadPoolExecutor
-from functools import partial
 from logging import Logger
 from threading import RLock
 from typing import Optional
@@ -10,11 +9,9 @@ import psutil
 import requests
 from tqdm import tqdm
 
+from uzak import Config
 from uzak.datamodel import DownloadDetails, ArchiveDetails
-from uzak.log import get_logger
-
-class DownloadError(Exception):
-    pass
+from uzak.download.base import DownloadError, BaseDownloader
 
 
 def get_file_hash(file_path: str) -> str:
@@ -26,10 +23,10 @@ def get_file_hash(file_path: str) -> str:
     return file_hash.hexdigest()
 
 
-class DownloadManager:
+class DirectDownloader(BaseDownloader):
 
-    def __init__(self, archive_dir: str, logger: Logger):
-        self.archive_dir = archive_dir
+    def __init__(self, config: Config, logger: Logger):
+        self.archive_dir = config.archive_dir
         self.logger = logger
 
     def download(
@@ -91,25 +88,23 @@ class DownloadManager:
 
         os.rename(part_path, dest_path)
 
-        return ArchiveDetails(
-            reference=download.archive_reference,
-            date_created=download.date_created,
-            file_name=download.file_name,
-            sha256=sha
-        )
+        return download.archive_details
 
     def download_all(
             self,
             downloads: list[DownloadDetails],
             check_length: bool = True,
-            verify: bool = True,
             quiet: bool = False
     ) -> list[ArchiveDetails]:
+        if len(downloads) == 1:
+            # If there is only one archive to download, do it the old non-multithreaded way, as the output from tqdm
+            # isn't great in a multithreaded context
+            return [self.download(downloads[0], check_length, True, quiet)]
         tqdm.set_lock(RLock())
         # below is attempt to address https://github.com/tqdm/tqdm/issues/670 but doesn't seem to work...
         posn_range = range(1, len(downloads) + 1)
         with ThreadPoolExecutor(initializer=tqdm.set_lock, initargs=(tqdm.get_lock(),)) as p:
             return list(p.map(
-                lambda d, posn: self.download(d, check_length, verify, quiet, posn),
+                lambda d, posn: self.download(d, check_length, True, quiet, posn),
                 downloads, posn_range
             ))

@@ -11,9 +11,15 @@ import platformdirs
 from uzak.config import Config
 from uzak.datamodel import ArchiveDetails, ArchiveReference
 from uzak.db import DbManager
-from uzak.download import DownloadManager, get_file_hash, DownloadManager
 from uzak.log import get_logger
 from uzak.parser import Parser, FileSizeSuffix, parse_date
+from uzak.download.base import BaseDownloader
+from uzak.download.direct import DirectDownloader
+try:
+    from uzak.download.torrent import QBitTorrentDownloader
+except ModuleNotFoundError:
+    QBitTorrentDownloader = None
+
 
 def bytes_to_str(b: int) -> str:
     """Convert a number of bytes to a human-readable description like "2.34 GB"."""
@@ -30,10 +36,20 @@ class ArchiveManager:
 
     def __init__(self, config: Config, logger: logging.Logger):
         self.config = config
+        if config.qbt_config is None:
+            self._downloader_cls: type[BaseDownloader] = DirectDownloader
+        else:
+            if QBitTorrentDownloader is None:
+                logger.warning("`qbittorrent` section found in config but `qbittorrent-api` module not installed. "
+                               "Reverting to direct downloader.")
+                self._downloader_cls = DirectDownloader
+            else:
+                self._downloader_cls = QBitTorrentDownloader
+
         self.logger = logger
         # Lazy initiate these as they may not be needed depending on the subcommands run
         self._db_manager: Optional[DbManager] = None
-        self._dl_manager: Optional[DownloadManager] = None
+        self._dl_manager: Optional[BaseDownloader] = None
         self._parser: Optional[Parser] = None
         if os.path.isfile(config.base_dir):
             raise FileExistsError(f"Already a non-directory file at {config.base_dir}.")
@@ -43,9 +59,9 @@ class ArchiveManager:
             os.makedirs(config.archive_dir)
 
     @property
-    def dl_manager(self) -> DownloadManager:
+    def dl_manager(self) -> BaseDownloader:
         if self._dl_manager is None:
-            self._dl_manager = DownloadManager(self.config.archive_dir, self.logger)
+            self._dl_manager = self._downloader_cls(self.config, self.logger)
         return self._dl_manager
 
     @property
@@ -86,7 +102,7 @@ class ArchiveManager:
         if zim_id is not None:
             subprocess.run([self.config.kiwix_manage_exec, self.config.library_path, "remove", zim_id])
 
-    def update(self, prompt: bool = False):
+    def update_old(self, prompt: bool = False):
         all_new = self.parser.find_updated_archives(self.db_manager)
         if not all_new:
             self.logger.info("Nothing to download.")
@@ -111,7 +127,7 @@ class ArchiveManager:
                     self.db_manager.delete_archive(old)
                     self.remove_from_library(old)
 
-    def update_async(self, prompt: bool = False, quiet: bool = False):
+    def update(self, prompt: bool = False, quiet: bool = False):
         all_new = self.parser.find_updated_archives(self.db_manager)
         if not all_new:
             self.logger.info("Nothing to download.")
@@ -124,12 +140,7 @@ class ArchiveManager:
             if proceed.lower() != "y":
                 self.logger.info("Aborting.")
                 return
-        if len(all_new) == 1:
-            # If there is only one archive to download, do it the old non-multithreaded way, as the output from tqdm
-            # isn't great in a multithreaded context
-            downloaded = [self.dl_manager.download(all_new[0], quiet=quiet)]
-        else:
-            downloaded = self.dl_manager.download_all(all_new, verify=True, quiet=quiet)
+        downloaded = self.dl_manager.download_all(all_new, check_length=True, quiet=quiet)
         for d in downloaded:
             self.db_manager.insert_archive(d)
             self.add_to_library(d)
@@ -167,12 +178,10 @@ class ArchiveManager:
         archive_filepath = os.path.join(self.config.archive_dir, archive_filename)
         if os.path.exists(archive_filepath):
             raise FileExistsError(f"File already exists: {archive_filepath}")
-        sha = get_file_hash(filepath)
         archive = ArchiveDetails(
             ref,
             date_created,
             archive_filename,
-            sha
         )
         if copy:
             shutil.copyfile(filepath, archive_filepath)
@@ -198,7 +207,7 @@ def main():
     update_parser = subparsers.add_parser("update", help="Update archives.")
     update_parser.add_argument("-p", "--prompt", action="store_true",
                                help="Prompt for confirmation (once) before downloading.")
-    update_parser.set_defaults(func=lambda mgr, ns: mgr.update_async(ns.prompt, quiet=ns.quiet))
+    update_parser.set_defaults(func=lambda mgr, ns: mgr.update(ns.prompt, quiet=ns.quiet))
     find_archives_parser = subparsers.add_parser("find-archives",
                                                  help="Get a list of all available archives, in an appropriate format "
                                                       "for inclusion in a config file.")

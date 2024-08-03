@@ -10,6 +10,14 @@ delete_old = true
 # Path to the `kiwix-manage` tool, used to manage the library file.
 kiwix_manage_exec = "/usr/bin/kiwix-manage"
 
+# Configuration options to download files via QBitTorrent's web API. If this section is not present, files will be
+# downloaded directly.
+[qbittorrent]
+host = "localhost"
+port = 8080
+username = "admin"
+password = "adminpass"
+
 [[archive]]
 project = "archlinux"
 language = "en"
