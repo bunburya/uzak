@@ -1,4 +1,5 @@
 import os.path
+import shutil
 import time
 from logging import Logger
 from time import sleep
@@ -40,14 +41,13 @@ class QBitTorrentDownloader(BaseDownloader):
             check_length: bool = True,
             start_paused: bool = False
     ) -> tuple[str, int]:
-        dest_path = os.path.join(self.archive_dir, download.file_name)
-        part_path = dest_path + ".part"
-        self.logger.info(f"Downloading to {dest_path}")
+        save_path = os.path.join(self.archive_dir, download.file_name) + ".files"
+        dl_path = save_path + ".part"
         self.client.torrents_add(
             urls=[download.torrent_link],
             tags=["uzak"],
-            download_path=part_path,
-            save_path=dest_path,
+            download_path=dl_path,
+            save_path=save_path,
             is_stopped=check_length or start_paused
         )
 
@@ -58,7 +58,7 @@ class QBitTorrentDownloader(BaseDownloader):
         tries = 0
         while info is None:
             for i in self.client.torrents_info(tag="uzak"):
-                if i.save_path == dest_path:
+                if i.save_path == save_path:
                     info = i
                     break
             else:
@@ -85,8 +85,8 @@ class QBitTorrentDownloader(BaseDownloader):
         dl_info: dict[str, tuple[DownloadDetails, int]] = {}
         archives: list[ArchiveDetails] = []
         for d in downloads:
-            h, s = self.download(d, check_length=False, start_paused=True)
-            dl_info[h] = (d, s)
+            h, size = self.download(d, check_length=False, start_paused=True)
+            dl_info[h] = (d, size)
         hashes = dl_info.keys()
         if check_length:
             total_size = sum(dl_info[h][1] for h in hashes)
@@ -97,9 +97,9 @@ class QBitTorrentDownloader(BaseDownloader):
                 self.client.torrents_start(torrent_hashes=hashes)
         pbars: dict[str, tqdm] = {}
         for h in dl_info:
-            d, s = dl_info[h]
+            d, size = dl_info[h]
             pbars[h] = tqdm(
-                total=s,
+                total=size,
                 unit='B',
                 unit_scale=True,
                 desc=d.file_name.removesuffix(".zim"),
@@ -111,9 +111,14 @@ class QBitTorrentDownloader(BaseDownloader):
                 if i.hash not in dl_info:
                     continue
                 if not quiet:
-                    pbars[i.hash].update(i.completed)
-                if os.path.isfile(i.save_path) and i.completed >= i.size:
+                    pb = pbars[i.hash]
+                    pb.update(pb.total - i.completed)  # Progress bar doesn't seem to work properly
+                if (i.completed >= i.size) and os.path.isdir(i.save_path):
                     dl = dl_info[i.hash][0]
+                    f = os.listdir(i.save_path)[0]
+                    os.rename(os.path.join(i.save_path, f), os.path.join(self.archive_dir, dl.file_name))
+                    shutil.rmtree(i.save_path)
+                    shutil.rmtree(i.save_path + ".part")
                     archives.append(dl.archive_details)
                     self.client.torrents_delete(torrent_hashes=[i.hash])
                     dl_info.pop(i.hash)
